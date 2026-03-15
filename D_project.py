@@ -59,23 +59,24 @@ def _relu(x):
 def _lstm_step(x, h_prev, c_prev, W, U, b):
     """
     LSTM 단일 스텝 연산 (numpy)
-    gates = sigmoid/tanh(W·x + U·h + b)
+    실제 Keras 가중치 shape:
+      W : (emb_dim, 4*units)  → x @ W
+      U : (units,  4*units)   → h @ U
+      b : (4*units,)
     """
-    z    = W @ x + U @ h_prev + b
-    d    = len(h_prev)
-    i    = _sigmoid(z[0*d : 1*d])   # input gate
-    f    = _sigmoid(z[1*d : 2*d])   # forget gate
-    g    = _tanh(   z[2*d : 3*d])   # cell gate
-    o    = _sigmoid(z[3*d : 4*d])   # output gate
-    c    = f * c_prev + i * g
-    h    = o * _tanh(c)
+    z = x @ W + h_prev @ U + b      # (4*units,)
+    d = W.shape[1] // 4              # units
+    i = _sigmoid(z[0*d : 1*d])      # input gate
+    f = _sigmoid(z[1*d : 2*d])      # forget gate
+    g = _tanh(   z[2*d : 3*d])      # cell gate
+    o = _sigmoid(z[3*d : 4*d])      # output gate
+    c = f * c_prev + i * g
+    h = o * _tanh(c)
     return h, c
 
-def _run_lstm(seq, weights_dict, units):
-    """단방향 LSTM 전체 시퀀스 실행"""
-    W = weights_dict["W"]   # (4*units, emb_dim)
-    U = weights_dict["U"]   # (4*units, units)
-    b = weights_dict["b"]   # (4*units,)
+def _run_lstm(seq, W, U, b):
+    """단방향 LSTM 전체 시퀀스 실행 — 마지막 hidden state 반환"""
+    units = W.shape[1] // 4          # (emb_dim, 4*units) → units
     h = np.zeros(units)
     c = np.zeros(units)
     for x in seq:
@@ -85,56 +86,58 @@ def _run_lstm(seq, weights_dict, units):
 def numpy_predict(bundle: dict, text: str) -> np.ndarray:
     """
     TensorFlow 없이 numpy 만으로 추론합니다.
-    bundle 에서 가중치와 tokenizer 를 꺼내 직접 행렬 연산합니다.
 
-    모델 구조: Embedding → BiLSTM → Dense(relu) → Dropout(추론시 비활성) → Dense(softmax)
+    실제 확인된 가중치 shape:
+      [0]  (1000, 32)  Embedding
+      [1]  (32,  128)  LSTM_fwd  W   (emb_dim, 4*units)
+      [2]  (32,  128)  LSTM_fwd  U   (units,   4*units)
+      [3]  (128,)      LSTM_fwd  b
+      [4]  (32,  128)  LSTM_bwd  W
+      [5]  (32,  128)  LSTM_bwd  U
+      [6]  (128,)      LSTM_bwd  b
+      [7]  (64,   32)  Dense1    W   (2*units, dense_units)
+      [8]  (32,)       Dense1    b
+      [9]  (32,    3)  Dense2    W   (dense_units, n_class)
+      [10] (3,)        Dense2    b
     """
     weights = bundle["weights"]
     maxlen  = bundle["maxlen"]
 
-    # ── v1.0(tokenizer 객체) / v2.0(word_index dict) 둘 다 호환 ─────────────
+    # v1.0(tokenizer 객체) / v2.0(word_index dict) 둘 다 호환
     if "word_index" in bundle:
-        # v2.0 — keras 없이 순수 dict 사용
         word_index = bundle["word_index"]
-        oov_idx    = word_index.get("<OOV>", 1)
     else:
-        # v1.0 — keras Tokenizer 객체에서 추출
-        tok        = bundle["tokenizer"]
-        word_index = tok.word_index
-        oov_idx    = word_index.get("<OOV>", 1)
-    tokens     = text.replace("\n", " ").split()
-    seq        = [word_index.get(w, oov_idx) for w in tokens][:maxlen]
-    seq        = seq + [0] * (maxlen - len(seq))   # post-padding
+        word_index = bundle["tokenizer"].word_index
+    oov_idx = word_index.get("<OOV>", 1)
+
+    # ── 토크나이징 + 패딩 ────────────────────────────────────────────────────
+    tokens = text.replace("\n", " ").split()
+    seq    = [word_index.get(w, oov_idx) for w in tokens][:maxlen]
+    seq    = seq + [0] * (maxlen - len(seq))     # post-padding
 
     # ── 가중치 언패킹 ────────────────────────────────────────────────────────
-    # Keras Sequential: [Embedding, BiLSTM(forward), BiLSTM(backward),
-    #                    Dense(relu), Dense(softmax)]
-    # weights 순서: [emb, W_f, U_f, b_f, W_b, U_b, b_b, W_d1, b_d1, W_d2, b_d2]
-    emb_matrix = weights[0]                          # (vocab, emb_dim)
-    W_f, U_f, b_f = weights[1], weights[2], weights[3]   # forward LSTM
-    W_b, U_b, b_b = weights[4], weights[5], weights[6]   # backward LSTM
-    W_d1, b_d1    = weights[7], weights[8]           # Dense relu
-    W_d2, b_d2    = weights[9], weights[10]          # Dense softmax
-
-    units = b_d1.shape[0]   # Dense 유닛 수
+    emb               = weights[0]               # (1000, 32)
+    W_f, U_f, b_f     = weights[1], weights[2], weights[3]
+    W_b, U_b, b_b     = weights[4], weights[5], weights[6]
+    W_d1, b_d1        = weights[7], weights[8]   # (64, 32), (32,)
+    W_d2, b_d2        = weights[9], weights[10]  # (32,  3), (3,)
 
     # ── Embedding lookup ─────────────────────────────────────────────────────
     embedded = np.array([
-        emb_matrix[idx] if idx < len(emb_matrix) else np.zeros(emb_matrix.shape[1])
+        emb[idx] if 0 < idx < len(emb) else np.zeros(emb.shape[1])
         for idx in seq
-    ])  # (maxlen, emb_dim)
+    ])  # (maxlen, emb_dim=32)
 
     # ── Bidirectional LSTM ───────────────────────────────────────────────────
-    h_fwd = _run_lstm(embedded,        {"W": W_f, "U": U_f, "b": b_f}, W_f.shape[0]//4)
-    h_bwd = _run_lstm(embedded[::-1],  {"W": W_b, "U": U_b, "b": b_b}, W_b.shape[0]//4)
-    h_bi  = np.concatenate([h_fwd, h_bwd])   # (2*lstm_units,)
+    h_fwd = _run_lstm(embedded,         W_f, U_f, b_f)   # (32,)
+    h_bwd = _run_lstm(embedded[::-1],   W_b, U_b, b_b)   # (32,)
+    h_bi  = np.concatenate([h_fwd, h_bwd])                # (64,)
 
-    # ── Dense(relu) ──────────────────────────────────────────────────────────
-    d1 = _relu(W_d1.T @ h_bi + b_d1)
+    # ── Dense relu : (64,) @ (64, 32) + (32,) → (32,) ───────────────────────
+    d1 = _relu(h_bi @ W_d1 + b_d1)
 
-    # ── Dense(softmax) ───────────────────────────────────────────────────────
-    logits = W_d2.T @ d1 + b_d2
-    probs  = _softmax(logits)
+    # ── Dense softmax : (32,) @ (32, 3) + (3,) → (3,) ───────────────────────
+    probs = _softmax(d1 @ W_d2 + b_d2)
 
     return probs
 
