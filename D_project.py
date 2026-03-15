@@ -89,13 +89,19 @@ def numpy_predict(bundle: dict, text: str) -> np.ndarray:
 
     모델 구조: Embedding → BiLSTM → Dense(relu) → Dropout(추론시 비활성) → Dense(softmax)
     """
-    weights  = bundle["weights"]
-    tok      = bundle["tokenizer"]
-    maxlen   = bundle["maxlen"]
+    weights = bundle["weights"]
+    maxlen  = bundle["maxlen"]
 
-    # ── 토크나이징 + 패딩 ────────────────────────────────────────────────────
-    word_index = tok.word_index
-    oov_idx    = tok.word_index.get("<OOV>", 1)
+    # ── v1.0(tokenizer 객체) / v2.0(word_index dict) 둘 다 호환 ─────────────
+    if "word_index" in bundle:
+        # v2.0 — keras 없이 순수 dict 사용
+        word_index = bundle["word_index"]
+        oov_idx    = word_index.get("<OOV>", 1)
+    else:
+        # v1.0 — keras Tokenizer 객체에서 추출
+        tok        = bundle["tokenizer"]
+        word_index = tok.word_index
+        oov_idx    = word_index.get("<OOV>", 1)
     tokens     = text.replace("\n", " ").split()
     seq        = [word_index.get(w, oov_idx) for w in tokens][:maxlen]
     seq        = seq + [0] * (maxlen - len(seq))   # post-padding
