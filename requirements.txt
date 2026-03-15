@@ -1,9 +1,4 @@
-# requirements.txt — Streamlit Cloud 배포용
-# tensorflow-cpu: 모델 구조 복원(model_from_json)에만 사용
-#                 학습은 데스크탑에서 진행하므로 CPU 버전으로 충분합니다
-
 streamlit>=1.31.0
 google-genai
-tensorflow-cpu>=2.13.0
 numpy>=1.24.0
 plotly>=5.18.0
